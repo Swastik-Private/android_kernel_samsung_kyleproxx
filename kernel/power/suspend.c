@@ -25,15 +25,10 @@
 #include <linux/suspend.h>
 #include <linux/syscore_ops.h>
 #include <linux/ftrace.h>
-<<<<<<< HEAD
-
 #ifdef CONFIG_SEC_GPIO_DVS
 #include <linux/secgpio_dvs.h>
 #endif
-
-=======
 #include <linux/rtc.h>
->>>>>>> e346941ca68c (PM / Suspend: Print wall time at suspend entry and exit)
 #include <trace/events/power.h>
 
 #include "power.h"
