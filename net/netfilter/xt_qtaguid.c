@@ -2345,7 +2345,7 @@ static int ctrl_cmd_tag(const char *input)
 			       input);
 			spin_unlock_bh(&sock_tag_list_lock);
 			res = -EINVAL;
-			goto err_tag_unref_put;
+			goto err_put;
 		}
 
 		/*
