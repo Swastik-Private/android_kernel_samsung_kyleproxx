@@ -1603,26 +1603,14 @@ static void binder_transaction(struct binder_proc *proc,
 		return_error = BR_FAILED_REPLY;
 		goto err_copy_data_failed;
 	}
-	if (!IS_ALIGNED(tr->offsets_size, sizeof(size_t))) {
-		binder_user_error("binder: %d:%d got transaction with "
-			"invalid offsets size, %zd\n",
-			proc->pid, thread->pid, tr->offsets_size);
-		return_error = BR_FAILED_REPLY;
-		goto err_bad_offset;
-	}
 	off_end = (void *)offp + tr->offsets_size;
 	off_min = 0;
 	for (; offp < off_end; offp++) {
 		struct flat_binder_object *fp;
-		if (*offp > t->buffer->data_size - sizeof(*fp) ||
-		    *offp < off_min ||
-		    t->buffer->data_size < sizeof(*fp) ||
-		    !IS_ALIGNED(*offp, sizeof(void *))) {
-			binder_user_error("%d:%d got transaction with invalid offset, %zd (min %zd, max %zd)\n",
-			  proc->pid, thread->pid, *offp,
-			  off_min,
-			  (t->buffer->data_size -
-			     sizeof(*fp)));
+		if (*offp > t->buffer->data_size - sizeof(*fp)) {
+			binder_user_error("binder: %d:%d got transaction with "
+				"invalid offset, %zd\n",
+				proc->pid, thread->pid, *offp);
 			return_error = BR_FAILED_REPLY;
 			goto err_bad_offset;
 		}
@@ -1840,8 +1828,76 @@ err_no_context_mgr_node:
 		thread->return_error = return_error;
 }
 
-int binder_thread_write(struct binder_proc *proc, struct binder_thread *thread,
-			void __user *buffer, int size, signed long *consumed)
+static void
+binder_transaction_buffer_release(struct binder_proc *proc, struct binder_buffer *buffer, size_t *failed_at)
+{
+	size_t *offp, *off_end;
+	int debug_id = buffer->debug_id;
+
+	if (binder_debug_mask & BINDER_DEBUG_TRANSACTION)
+		printk(KERN_INFO "binder: %d buffer release %d, size %zd-%zd, failed at %p\n",
+			   proc->pid, buffer->debug_id,
+			   buffer->data_size, buffer->offsets_size, failed_at);
+
+	if (buffer->target_node)
+		binder_dec_node(buffer->target_node, 1, 0);
+
+	offp = (size_t *)(buffer->data + ALIGN(buffer->data_size, sizeof(void *)));
+	if (failed_at)
+		off_end = failed_at;
+	else
+		off_end = (void *)offp + buffer->offsets_size;
+	for (; offp < off_end; offp++) {
+		struct flat_binder_object *fp;
+		if (*offp > buffer->data_size - sizeof(*fp)) {
+			printk(KERN_ERR "binder: transaction release %d bad"
+					"offset %zd, size %zd\n", debug_id, *offp, buffer->data_size);
+			continue;
+		}
+		fp = (struct flat_binder_object *)(buffer->data + *offp);
+		switch (fp->type) {
+		case BINDER_TYPE_BINDER:
+		case BINDER_TYPE_WEAK_BINDER: {
+			struct binder_node *node = binder_get_node(proc, fp->binder);
+			if (node == NULL) {
+				printk(KERN_ERR "binder: transaction release %d bad node %p\n", debug_id, fp->binder);
+				break;
+			}
+			if (binder_debug_mask & BINDER_DEBUG_TRANSACTION)
+				printk(KERN_INFO "        node %d u%p\n",
+				       node->debug_id, node->ptr);
+			binder_dec_node(node, fp->type == BINDER_TYPE_BINDER, 0);
+		} break;
+		case BINDER_TYPE_HANDLE:
+		case BINDER_TYPE_WEAK_HANDLE: {
+			struct binder_ref *ref = binder_get_ref(proc, fp->handle);
+			if (ref == NULL) {
+				printk(KERN_ERR "binder: transaction release %d bad handle %ld\n", debug_id, fp->handle);
+				break;
+			}
+			if (binder_debug_mask & BINDER_DEBUG_TRANSACTION)
+				printk(KERN_INFO "        ref %d desc %d (node %d)\n",
+				       ref->debug_id, ref->desc, ref->node->debug_id);
+			binder_dec_ref(ref, fp->type == BINDER_TYPE_HANDLE);
+		} break;
+
+		case BINDER_TYPE_FD:
+			if (binder_debug_mask & BINDER_DEBUG_TRANSACTION)
+				printk(KERN_INFO "        fd %ld\n", fp->handle);
+			if (failed_at)
+				task_close_fd(proc->tsk, fp->handle);
+			break;
+
+		default:
+			printk(KERN_ERR "binder: transaction release %d bad object type %lx\n", debug_id, fp->type);
+			break;
+		}
+	}
+}
+
+int
+binder_thread_write(struct binder_proc *proc, struct binder_thread *thread,
+		    void __user *buffer, int size, signed long *consumed)
 {
 	uint32_t cmd;
 	void __user *ptr = buffer + *consumed;
